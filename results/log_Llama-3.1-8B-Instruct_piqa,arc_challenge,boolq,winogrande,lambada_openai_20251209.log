@@ -1,0 +1,12 @@
+2025-12-09 12:13:05 - Results for Llama-3.1-8B-Instruct on piqa,arc_challenge,boolq,winogrande,lambada_openai:
+|    Tasks     |Version|Filter|n-shot|  Metric  |   |Value |   |Stderr|
+|--------------|------:|------|-----:|----------|---|-----:|---|-----:|
+|arc_challenge |      1|none  |     0|acc       |↑  |0.4949|±  |0.0146|
+|              |       |none  |     0|acc_norm  |↑  |0.5256|±  |0.0146|
+|boolq         |      2|none  |     0|acc       |↑  |0.8287|±  |0.0066|
+|lambada_openai|      1|none  |     0|acc       |↑  |0.7192|±  |0.0063|
+|              |       |none  |     0|perplexity|↓  |3.5731|±  |0.0782|
+|piqa          |      1|none  |     0|acc       |↑  |0.7992|±  |0.0093|
+|              |       |none  |     0|acc_norm  |↑  |0.8047|±  |0.0092|
+|winogrande    |      1|none  |     0|acc       |↑  |0.7309|±  |0.0125|
+
