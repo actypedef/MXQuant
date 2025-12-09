@@ -9,7 +9,7 @@ MXQuant-自然语言处理课程设计
 同时将激活值矩阵量化为 MXFP8 ，实现了预填充阶段接近 80% 的速度提升
 
 
-在压缩与加速的条件下，模型在下游任务 0-shot 上维持 Llama3.1-8B 98.5% 的准确率
+在压缩与加速的条件下，模型在下游任务 0-shot 上维持 Llama3.1-8B 98.8% 的准确率
 
 
 量化 CUDA Kernel 实现参考了 [MicroMix](https://github.com/lwy2020/MicroMix)
