@@ -23,7 +23,7 @@ conda activate mxquant
 Please make sure that [CUDA 12.8](https://developer.nvidia.com/cuda-12-8-1-download-archive?target_os=Linux&target_arch=x86_64&Distribution=Ubuntu&target_version=22.04&target_type=runfile_local) is in your environment.
 ```bash
 git clone --recurse-submodules https://github.com/actypedef/MXQuant.git
-cd MicroMix
+cd MXQuant
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
