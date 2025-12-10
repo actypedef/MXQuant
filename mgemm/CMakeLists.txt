@@ -75,8 +75,3 @@ target_compile_definitions(mixedgemm PRIVATE CUTLASS_ARCH_SM120_SUPPORTED)
 set_property(TARGET mixedgemm PROPERTY CXX_STANDARD 17)
 set_target_properties(mixedgemm PROPERTIES PREFIX "")
 add_definitions(-DTORCH_EXTENSION_NAME=mixedgemm)
-
-
-add_executable(bench_mxf4f6f8 benchmark/mxf4f6f8_bench.cu)
-target_compile_options(bench_mxf4f6f8 PRIVATE -Xptxas=-v -lineinfo -w -O3)
-target_link_libraries(bench_mxf4f6f8 gemm_objs)

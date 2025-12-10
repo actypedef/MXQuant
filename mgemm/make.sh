@@ -1,2 +1,2 @@
 cmake -B build -S .
-cmake --build build -j 32
+cmake --build build -j 16
