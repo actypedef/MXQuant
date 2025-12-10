@@ -1,8 +1,9 @@
 import torch
 import argparse
 import sys
-from typing import Optional
-from model_utils import reorder_model_llama, reorder_model_qwen, reorder_model_mixtral
+import os
+# 假设 model_utils 和之前的加载逻辑保持不变...
+from model_utils import reorder_model_llama, reorder_model_qwen
 
 def get_llama(model_path):
     """加载Llama模型"""
@@ -86,160 +87,185 @@ def load_quantized_model(model_path, model_name, kv_cache=False, device='cuda:0'
     
     return model, tokenizer
 
-def generate_response(model, tokenizer, prompt, device='cuda:0', 
-                      max_new_tokens=200, temperature=0.7, top_p=0.9):
-    """生成回复（使用正确的对话格式）"""
-    
-    # 1. 构建模型期待的对话消息格式
-    messages = [
-        {"role": "user", "content": prompt}
-    ]
-    
-    # 2. 使用tokenizer的内置模板将消息格式化为模型所需的输入文本
-    # 这是最关键的一步，它会自动添加 <|begin_of_text|>、<|start_header_id|>user<|end_header_id|> 等特殊token
-    input_text = tokenizer.apply_chat_template(
-        messages,
-        tokenize=False,  # 先不tokenize，为了查看格式，但这里直接返回文本
-        add_generation_prompt=True  # 添加提示让模型开始生成
-    )
-    
-    # 3. 将格式化后的文本转换为模型输入
-    input_ids = tokenizer(input_text, return_tensors="pt").to(device)
-    
-    # 4. 生成参数设置：使用 max_new_tokens 控制生成长度
-    generation_config = {
-        "max_new_tokens": max_new_tokens,  # 控制新生成token的数量，避免过长
-        "temperature": temperature,
-        "top_p": top_p,
-        "do_sample": True,
-        "pad_token_id": tokenizer.eos_token_id,
-    }
-    
-    # 5. 生成回复
-    with torch.no_grad():
-        outputs = model.generate(
-            **input_ids,
-            **generation_config
-        )
-    
-    # 6. 解码输出（跳过输入部分）
-    input_length = input_ids.input_ids.shape[1]
-    response = tokenizer.decode(outputs[0][input_length:], skip_special_tokens=True)
-    
-    return response
+
+# ==========================================
+# 新增/修改的核心部分
+# ==========================================
+
+class ChatSession:
+    """管理对话历史和生成的类"""
+    def __init__(self, model, tokenizer, device='cuda:0'):
+        self.model = model
+        self.tokenizer = tokenizer
+        self.device = device
+        self.history = []  # 存储上下文 [{"role": "user", "content": "..."}, ...]
+
+    def clear_history(self):
+        self.history = []
+        print("\n[系统] 上下文已清空。\n")
+
+    def generate(self, user_input, max_new_tokens=1024, temperature=0.7, top_p=0.9):
+        # 1. 更新用户输入到历史
+        self.history.append({"role": "user", "content": user_input})
+
+        # 2. 生成 Prompt 字符串 (不直接转 Tensor，防止报错)
+        try:
+            prompt_text = self.tokenizer.apply_chat_template(
+                self.history,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+        except Exception as e:
+            # 如果历史记录脏了，回退到单轮对话，防止死循环
+            print(f"\n[Warning] 上下文格式错误，重置记忆... Error: {e}")
+            self.history = [{"role": "user", "content": user_input}]
+            prompt_text = self.tokenizer.apply_chat_template(
+                self.history, tokenize=False, add_generation_prompt=True
+            )
+
+        # 3. 手动分词 (add_special_tokens=False 因为模板里已经有了)
+        input_ids = self.tokenizer(
+            prompt_text,
+            return_tensors="pt",
+            add_special_tokens=False
+        ).to(self.device)
+        
+        input_length = input_ids.input_ids.shape[1]
+
+        # 4. 生成配置
+        generation_config = {
+            "max_new_tokens": max_new_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "do_sample": True,
+            "pad_token_id": self.tokenizer.eos_token_id,
+        }
+
+        # 5. 推理
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **input_ids,
+                **generation_config
+            )
+
+        # 6. 解码 (保留特殊字符，以便我们手动处理)
+        response_ids = outputs[0][input_length:]
+        response = self.tokenizer.decode(response_ids, skip_special_tokens=False)
+
+        # =====================================================
+        # [核心修复] 清洗所有可能导致下一轮报错的特殊结束标记
+        # =====================================================
+        
+        # 定义需要移除的“坏”标记列表
+        bad_tokens = [
+            # Llama 3.1 特有
+            "<|eot_id|>", 
+            "<|eom_id|>", 
+            "<|start_header_id|>", 
+            "<|end_header_id|>",
+            # Qwen 特有
+            "<|im_end|>", 
+            "<|im_start|>",
+            # 通用
+            "<|endoftext|>",
+            self.tokenizer.eos_token  # 自动获取当前模型的 EOS
+        ]
+        
+        # 过滤掉 None 类型 (防止 self.tokenizer.eos_token 为 None)
+        bad_tokens = [t for t in bad_tokens if t is not None]
+
+        # 执行清洗
+        for token in bad_tokens:
+            response = response.replace(token, "")
+
+        response = response.strip()
+
+        # 7. 更新历史
+        self.history.append({"role": "assistant", "content": response})
+
+        return response
 
 def interactive_mode(model, tokenizer, device='cuda:0'):
-    """交互模式"""
+    """交互模式 (支持多轮对话)"""
+    session = ChatSession(model, tokenizer, device)
+    
     print("\n" + "="*50)
-    print("模型加载完成！输入你的问题（输入 'quit' 或 'exit' 退出）")
+    print(f"模型加载完成！当前设备: {device}")
+    print("指令说明:")
+    print("  - 输入对话内容按回车发送")
+    print("  - 输入 '/clear' 清空上下文记忆")
+    print("  - 输入 '/quit' 或 'exit' 退出")
     print("="*50 + "\n")
     
     while True:
         try:
-            # 获取用户输入
-            prompt = input(">>> ").strip()
+            prompt = input("User >>> ").strip()
             
+            # 处理特殊指令
             if prompt.lower() in ['quit', 'exit', 'q']:
                 print("再见！")
                 break
-            
+            if prompt.lower() == '/clear':
+                session.clear_history()
+                continue
             if not prompt:
                 continue
             
-            print("\n思考中...", end="", flush=True)
+            print("Bot  >>> 思考中...", end="", flush=True)
             
             # 生成回复
-            response = generate_response(
-                model, tokenizer, prompt, device,
-                max_new_tokens=256, temperature=0.7, top_p=0.9  # 将 max_length 改为 max_new_tokens
+            # 针对 Qwen3，由于可能有 <think> 过程，建议适当增加 max_new_tokens
+            response = session.generate(
+                prompt,
+                max_new_tokens=1024,  # Qwen3 思考模式可能需要更长的长度
+                temperature=0.7, 
+                top_p=0.9
             )
             
-            print("\n" + "-"*50)
-            print("回复:")
-            print(response)
-            print("-"*50 + "\n")
+            # 清除 "思考中..." 并打印结果
+            print(f"\rBot  >>> {response}\n")
             
         except KeyboardInterrupt:
-            print("\n\n检测到中断，正在退出...")
+            print("\n\n[系统] 检测到中断，正在退出...")
             break
         except Exception as e:
-            print(f"\n错误: {e}")
+            print(f"\n[错误] 生成失败: {e}")
+            import traceback
+            traceback.print_exc()
+            # 出错时不中断循环，允许重试
             continue
 
 def single_prompt_mode(model, tokenizer, prompt, device='cuda:0'):
-    """单次提示模式"""
-    print(f"输入: {prompt}")
-    print("\n生成回复中...")
-    
-    response = generate_response(
-        model, tokenizer, prompt, device,
-        max_length=512, temperature=0.7, top_p=0.9
-    )
-    
-    print("\n" + "="*50)
-    print("回复:")
-    print(response)
-    print("="*50)
+    """单次模式也使用 Session 以复用逻辑"""
+    session = ChatSession(model, tokenizer, device)
+    print(f"User: {prompt}")
+    print("\n生成中...")
+    response = session.generate(prompt, max_new_tokens=1024)
+    print(f"Bot: {response}")
+
+# ==========================================
+# Main 函数 (稍微调整调用逻辑)
+# ==========================================
 
 def main():
-    parser = argparse.ArgumentParser(description="量化模型交互式Demo")
+    parser = argparse.ArgumentParser(description="量化模型多轮对话Demo")
     
     # 必需参数
-    parser.add_argument(
-        'model_path',
-        type=str,
-        help='模型路径（HuggingFace格式的checkpoint）'
-    )
+    parser.add_argument('model_path', type=str, help='模型路径')
     
     # 可选参数
-    parser.add_argument(
-        '--prompt',
-        type=str,
-        default=None,
-        help='直接提供提示词（如果不提供则进入交互模式）'
-    )
-    parser.add_argument(
-        '--kv_cache',
-        action='store_true',
-        help='是否量化KV缓存'
-    )
-    parser.add_argument(
-        '--device',
-        type=str,
-        default='cuda:0',
-        help='设备（如 cuda:0, cuda:1, cpu）'
-    )
-    parser.add_argument(
-        '--max_length',
-        type=int,
-        default=512,
-        help='生成的最大长度'
-    )
-    parser.add_argument(
-        '--temperature',
-        type=float,
-        default=0.7,
-        help='生成温度（越高越随机）'
-    )
-    parser.add_argument(
-        '--top_p',
-        type=float,
-        default=0.9,
-        help='top-p采样参数'
-    )
+    parser.add_argument('--prompt', type=str, default=None, help='单次模式提示词')
+    parser.add_argument('--kv_cache', action='store_true', help='是否量化KV缓存')
+    parser.add_argument('--device', type=str, default='cuda:0', help='设备')
     
     args = parser.parse_args()
     
     try:
-        # 从模型路径提取模型名称
         model_name = args.model_path.split('/')[-2] if '/' in args.model_path else args.model_path
         
-        print(f"加载模型: {args.model_path}")
-        print(f"模型名称: {model_name}")
-        print(f"设备: {args.device}")
-        print(f"量化KV缓存: {args.kv_cache}")
+        print(f"正在加载: {model_name} ...")
         
-        # 加载量化模型
+        # 调用你原有的加载函数
         model, tokenizer = load_quantized_model(
             args.model_path, 
             model_name, 
@@ -247,24 +273,11 @@ def main():
             device=args.device
         )
         
-        print("模型加载完成！")
-        
-        # 根据是否有prompt选择模式
         if args.prompt:
-            single_prompt_mode(
-                model, tokenizer, args.prompt, args.device
-            )
+            single_prompt_mode(model, tokenizer, args.prompt, args.device)
         else:
             interactive_mode(model, tokenizer, args.device)
             
-    except FileNotFoundError as e:
-        print(f"错误: {e}")
-        print("\n提示：请确保你已经运行过量化脚本并生成了以下文件：")
-        print(f"  - ./saved/{{model_name}}_reorder_index_wikitext2_{{mean/hessian}}.pt")
-        print(f"  - ./saved/{{model_name}}_p6_num_wikitext2_{{mean/hessian}}.pt")
-        print(f"  - ./saved/{{model_name}}_p8_num_wikitext2_{{mean/hessian}}.pt")
-        print("\n你可以通过运行原脚本的量化部分来生成这些文件。")
-        sys.exit(1)
     except Exception as e:
         print(f"发生错误: {e}")
         import traceback
